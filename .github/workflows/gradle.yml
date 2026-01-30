@@ -1,4 +1,4 @@
-name: Java CI/CD with Kafka Support
+name: Kafka Consumer CI/CD
 
 on:
   push:
@@ -8,56 +8,65 @@ jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
 
-      - name: Build with Gradle
-        run: ./gradlew build -x test
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v4
 
-      # 1. 서버에 배포 폴더 확인 및 권한 설정
-      - name: Prepare Deploy Directory
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.SSH_KEY }}
-          port: 2222
-          script: |
-            sudo mkdir -p /var/www/chat-server
-            sudo chown -R $USER:$USER /var/www/chat-server
-            # 카프카 폴더 권한도 확인 (필요시)
-            sudo chown -R $USER:$USER /var/www/kafka
+    - name: Grant execute permission for gradlew
+      run: chmod +x gradlew
 
-      # 2. JAR 파일 전송
-      - name: Copy JAR to Server
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.SSH_KEY }}
-          port: 2222
-          source: "build/libs/*.jar"
-          target: "/var/www/chat-server"
-          strip_components: 2
+    - name: Build with Gradle
+      run: ./gradlew build -x test
 
-      # 3. 서비스 재시작 및 카프카 연결 확인
-      - name: Restart Service
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.SSH_KEY }}
-          port: 2222
-          script: |
-            mv /var/www/chat-server/*.jar /var/www/chat-server/chat-server.jar
-            sudo systemctl restart donation-chat
-            
-            # 서비스 상태 및 카프카 포트(9092) 리스닝 확인
-            sleep 5
-            sudo systemctl status donation-chat --no-pager
-            netstat -tlnp | grep 9092 || echo "Warning: Kafka port 9092 is not active!"
+    # 0. 서버에 배포 폴더 생성
+    - name: Create deploy directory
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.HOST }}
+        username: ${{ secrets.USERNAME }}
+        key: ${{ secrets.SSH_KEY }}
+        port: 2222
+        script: |
+          sudo mkdir -p /var/www/kafka-consumer
+          sudo chown $USER:$USER /var/www/kafka-consumer
+
+    # 1. JAR 파일을 서버로 전송
+    - name: Copy JAR to Server
+      uses: appleboy/scp-action@v0.1.7
+      with:
+        host: ${{ secrets.HOST }}
+        username: ${{ secrets.USERNAME }}
+        key: ${{ secrets.SSH_KEY }}
+        port: 2222
+        source: "build/libs/kafka-0.0.1-SNAPSHOT.jar"
+        target: "/var/www/kafka-consumer"
+        strip_components: 2
+        overwrite: true
+
+    # 2. 기존 파일 백업 및 서비스 재시작
+    - name: Execute remote ssh commands
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.HOST }}
+        username: ${{ secrets.USERNAME }}
+        key: ${{ secrets.SSH_KEY }}
+        port: 2222
+        script: |
+          # 기존 파일 백업
+          if [ -f "/var/www/kafka-consumer/kafka-consumer.jar" ]; then
+            cp /var/www/kafka-consumer/kafka-consumer.jar /var/www/kafka-consumer/kafka-consumer.jar.bak_$(date +%Y%m%d_%H%M%S)
+          fi
+          # SNAPSHOT.jar -> kafka-consumer.jar 이름 변경
+          mv /var/www/kafka-consumer/kafka-0.0.1-SNAPSHOT.jar /var/www/kafka-consumer/kafka-consumer.jar
+          # 서비스 재시작
+          sudo systemctl restart donation-kafka-consumer
+          # 배포 결과 확인
+          ls -l /var/www/kafka-consumer/kafka-consumer.jar*
+          systemctl status donation-kafka-consumer --no-pager
